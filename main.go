@@ -10,30 +10,32 @@ import (
 	"sync"
 )
 
+const (
+	tileSize     = 100
+	imgSize  int = 1e3
+)
+
 func main() {
-	tileSize := 100
-	var xSize, ySize int = 1e3, 1e3
-
 	// create final image container
-	img := image.NewRGBA(image.Rect(0, 0, xSize, ySize))
+	img := image.NewRGBA(image.Rect(0, 0, imgSize, imgSize))
 
-	// create channels
+	// create channels and waitgroups
 	in := make(chan work, 1e3)
 	out := make(chan *image.RGBA, 1e3)
 
-	// start workers
-	wg, wgOut := &sync.WaitGroup{}, &sync.WaitGroup{}
-	for i := 0; i < img.Bounds().Dx()/tileSize; i++ {
-		wg.Add(1)
+	wkrs, rdc := &sync.WaitGroup{}, &sync.WaitGroup{}
 
-		// launch worker
-		go worker(wg, in, out)
+	// start workers
+	for i := 0; i < img.Bounds().Dx()/tileSize; i++ {
+		wkrs.Add(1)
+
+		go worker(wkrs, in, out)
 	}
 
-	// launch "reduce" clojure
-	wgOut.Add(1)
+	// launch "reduce" closure
+	rdc.Add(1)
 	go func() {
-		defer wgOut.Done() // signal we are done on exit
+		defer rdc.Done() // signal we are done on exit
 
 		// until tiles arrive, add them to the final image
 		for tile := range out {
@@ -41,26 +43,29 @@ func main() {
 		}
 	}()
 
-	// send work
-	for x := 0; x < xSize; x += tileSize {
-		for y := 0; y < ySize; y += tileSize {
+	// send work:
+	// it would be not efficient to create a worker per pixel,
+	// much better use a pool of workers, each for a tile containing
+	// a certain number of pixels
+	for x := 0; x < imgSize; x += tileSize {
+		for y := 0; y < imgSize; y += tileSize {
+
 			in <- work{
 				x: x, y: y, dx: tileSize, dy: tileSize,
-				// colorFunc: func(x, y int) color.RGBA {
-				// 	return color.RGBA{uint8(x * 255 / img.Bounds().Dx()), uint8(y * 255 / img.Bounds().Dy()), 100, 255}
-				// },
-				colorFunc: func(x, y int) color.RGBA {
-					return color.RGBA{uint8(x * 255 / tileSize), uint8(y * 255 / tileSize), 100, 255}
-				},
+				// here you can change the type of resulting image by choosing
+				// how to color each tile
+				colorFunc: newCF(imgSize), // single image
+				// colorFunc: newCF(tileSize), // identical tiles
 			}
 		}
 	}
 
 	// close channel and wait for the goroutines to complete
 	close(in)
-	wg.Wait()
+	wkrs.Wait()
+
 	close(out)
-	wgOut.Wait()
+	rdc.Wait()
 
 	// save final image
 	err := save(img)
@@ -69,13 +74,22 @@ func main() {
 	}
 }
 
+type cf = func(x, y int) color.RGBA
+
+func newCF(sideSize int) cf {
+	return func(x, y int) color.RGBA {
+		return color.RGBA{uint8(x * 255 / sideSize), uint8(y * 255 / sideSize), 100, 255}
+	}
+}
+
 type work struct {
 	x, y, dx, dy int
 	colorFunc    func(x, y int) color.RGBA
 }
 
-func worker(wg *sync.WaitGroup, in chan work, out chan *image.RGBA) {
-	defer wg.Done()     // signal the goroutine is over
+func worker(wkrs *sync.WaitGroup, in chan work, out chan *image.RGBA) {
+	defer wkrs.Done() // signal the goroutine is over
+
 	for w := range in { // until we have work to do
 		tile := image.NewRGBA(image.Rect(w.x, w.y, w.x+w.dx, w.y+w.dy)) // create empty tile
 
@@ -83,10 +97,12 @@ func worker(wg *sync.WaitGroup, in chan work, out chan *image.RGBA) {
 		for xx := w.x; xx < w.x+w.dx; xx++ {
 			for yy := w.y; yy < w.y+w.dy; yy++ {
 
-				// set pixel color
+				// set pixel color using the choosen color function
 				tile.SetRGBA(xx, yy, w.colorFunc(xx, yy))
 			}
 		}
+
+		// send the result to the reducer
 		out <- tile
 	}
 }
@@ -96,11 +112,13 @@ func save(img image.Image) error {
 	if err != nil {
 		return err
 	}
+
 	defer f.Close()
 
 	err = png.Encode(f, img)
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
