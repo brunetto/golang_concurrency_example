@@ -8,11 +8,15 @@ import (
 	"log"
 	"os"
 	"sync"
+
+	"github.com/pkg/errors"
 )
 
 const (
 	tileSize     = 100
 	imgSize  int = 1e3
+
+	chanSize int = 1e3
 )
 
 func main() {
@@ -20,8 +24,8 @@ func main() {
 	img := image.NewRGBA(image.Rect(0, 0, imgSize, imgSize))
 
 	// create channels and waitgroups
-	in := make(chan work, 1e3)
-	out := make(chan *image.RGBA, 1e3)
+	in := make(chan work, chanSize)
+	out := make(chan *image.RGBA, chanSize)
 
 	wkrs, rdc := &sync.WaitGroup{}, &sync.WaitGroup{}
 
@@ -34,6 +38,7 @@ func main() {
 
 	// launch "reduce" closure
 	rdc.Add(1)
+
 	go func() {
 		defer rdc.Done() // signal we are done on exit
 
@@ -49,7 +54,6 @@ func main() {
 	// a certain number of pixels
 	for x := 0; x < imgSize; x += tileSize {
 		for y := 0; y < imgSize; y += tileSize {
-
 			in <- work{
 				x: x, y: y, dx: tileSize, dy: tileSize,
 				// here you can change the type of resulting image by choosing
@@ -70,7 +74,7 @@ func main() {
 	// save final image
 	err := save(img)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(errors.Wrap(err, "can't save final image"))
 	}
 }
 
@@ -92,12 +96,10 @@ func worker(wkrs *sync.WaitGroup, in chan work, out chan *image.RGBA) {
 
 	for w := range in { // until we have work to do
 		tile := image.NewRGBA(image.Rect(w.x, w.y, w.x+w.dx, w.y+w.dy)) // create empty tile
-
 		// loop over the tile pixels
 		for xx := w.x; xx < w.x+w.dx; xx++ {
 			for yy := w.y; yy < w.y+w.dy; yy++ {
-
-				// set pixel color using the choosen color function
+				// set pixel color using the chosen color function
 				tile.SetRGBA(xx, yy, w.colorFunc(xx, yy))
 			}
 		}
@@ -110,14 +112,14 @@ func worker(wkrs *sync.WaitGroup, in chan work, out chan *image.RGBA) {
 func save(img image.Image) error {
 	f, err := os.Create("example.png")
 	if err != nil {
-		return err
+		return errors.Wrap(err, "can't create final image file")
 	}
 
 	defer f.Close()
 
 	err = png.Encode(f, img)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "can't encode image to png file")
 	}
 
 	return nil
